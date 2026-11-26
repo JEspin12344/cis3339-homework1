@@ -1,103 +1,237 @@
-const express = require('express');
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+require('dotenv').config()
 
-const DATA_FILE = path.join(__dirname, 'students.json');
+const express = require('express')
+const cors = require('cors')
+const mongoose = require('mongoose')
+const path = require('path')
 
-async function loadStudents() {
-    try {
-        const data = await fs.promises.readFile(DATA_FILE, 'utf8');
-        return JSON.parse(data);
-    } catch (error) {
-        if (error.code === 'ENOENT') {
-            return [];
-        }
-        console.error('Error reading students file:', error);
-        return [];
-    }
+const Student = require('./models/Student')
+const Course = require('./models/Courses')
+const Enrollment = require('./models/Enrollment')
+
+const app = express()
+const PORT = process.env.PORT || 3000
+
+app.use(cors())
+app.use(express.json())
+
+function clean(value) {
+  return typeof value === 'string' ? value.trim() : ''
 }
 
-async function saveStudents(students) {
-    try {
-        await fs.promises.writeFile(DATA_FILE, JSON.stringify(students, null, 2), 'utf8');
-    } catch (error) {
-        console.error('Error writing students file:', error);
-        throw error;
-    }
+function handleError(error, res) {
+  console.error(error)
+
+  if (error.code === 11000) {
+    return res.status(409).json({
+      error: 'This record already exists.'
+    })
+  }
+
+  if (error.name === 'ValidationError' ||
+      error.name === 'CastError') {
+    return res.status(400).json({
+      error: 'Invalid information provided.'
+    })
+  }
+
+  return res.status(500).json({
+    error: 'An unexpected server error occurred.'
+  })
 }
 
-// Endpoint to search for a student by name
-app.post('/find-student', async (req, res) => {
-    try {
-        const { name } = req.body;
-        if (!name) {
-            return res.status(400).send({ error: 'Student name is required' });
-        }
+// STUDENTS
 
-        const students = await loadStudents();
-        const student = students.find((item) => item.name === name);
-        if (!student) {
-            return res.status(404).send({ error: 'Student not found' });
-        }
+app.get('/api/students', async (req, res) => {
+  try {
+    const filter = {}
 
-        res.send(student);
-    } catch (error) {
-        console.error('Error finding student:', error);
-        res.status(500).send({ error: 'Internal server error' });
+    if (req.query.name) {
+      filter.name = {
+        $regex: clean(req.query.name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+        $options: 'i'
+      }
     }
-});
 
-// Endpoint to save a student
-app.post('/add-student', async (req, res) => {
-    try {
-        const { name, id, phone, zip } = req.body;
-        if (!name || !id || !phone || !zip) {
-            return res.status(400).send({ error: 'All fields (name, id, phone, zip) are required' });
-        }
+    const students = await Student.find(filter).sort({ name: 1 })
+    res.json(students)
+  } catch (error) {
+    handleError(error, res)
+  }
+})
 
-        const students = await loadStudents();
-        const newStudent = { name, id, phone, zip };
-        students.push(newStudent);
-        await saveStudents(students);
+app.post('/api/students', async (req, res) => {
+  try {
+    const name = clean(req.body.name)
+    const id = clean(req.body.id)
+    const phone = clean(req.body.phone)
+    const zip = clean(req.body.zip)
 
-        res.status(201).send({ message: 'Student added successfully', student: newStudent });
-    } catch (error) {
-        console.error('Error adding student:', error);
-        res.status(500).send({ error: 'Internal server error' });
+    if (!name || !id || !phone || !zip) {
+      return res.status(400).json({
+        error: 'All student fields are required.'
+      })
     }
-});
 
-// Endpoint to delete a student by name
-app.post('/delete-student', async (req, res) => {
-    try {
-        const { name } = req.body;
-        if (!name) {
-            return res.status(400).send({ error: 'Student name is required' });
-        }
+    const student = await Student.create({
+      name, id, phone, zip
+    })
 
-        const students = await loadStudents();
-        const index = students.findIndex((item) => item.name === name);
-        if (index === -1) {
-            return res.status(404).send({ error: 'Student not found' });
-        }
+    res.status(201).json(student)
+  } catch (error) {
+    handleError(error, res)
+  }
+})
 
-        const deletedStudent = students.splice(index, 1)[0];
-        await saveStudents(students);
+app.delete('/api/students/:id', async (req, res) => {
+  try {
+    const student = await Student.findById(req.params.id)
 
-        res.send({ message: 'Student deleted successfully', student: deletedStudent });
-    } catch (error) {
-        console.error('Error deleting student:', error);
-        res.status(500).send({ error: 'Internal server error' });
+    if (!student) {
+      return res.status(404).json({
+        error: 'Student not found.'
+      })
     }
-});
 
-// Start the server
-const PORT = 3000;
-app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
-});
+    await Enrollment.deleteMany({ student: student._id })
+    await student.deleteOne()
+
+    res.json({ message: 'Student deleted successfully.' })
+  } catch (error) {
+    handleError(error, res)
+  }
+})
+
+// COURSES
+
+app.get('/api/courses', async (req, res) => {
+  try {
+    const courses = await Course.find().sort({ courseId: 1 })
+    res.json(courses)
+  } catch (error) {
+    handleError(error, res)
+  }
+})
+
+app.post('/api/courses', async (req, res) => {
+  try {
+    const courseId = clean(req.body.courseId)
+    const courseName = clean(req.body.courseName)
+
+    if (!courseId || !courseName) {
+      return res.status(400).json({
+        error: 'Course ID and name are required.'
+      })
+    }
+
+    const course = await Course.create({ courseId, courseName })
+    res.status(201).json(course)
+  } catch (error) {
+    handleError(error, res)
+  }
+})
+
+app.delete('/api/courses/:id', async (req, res) => {
+  try {
+    const course = await Course.findById(req.params.id)
+
+    if (!course) {
+      return res.status(404).json({
+        error: 'Course not found.'
+      })
+    }
+
+    await Enrollment.deleteMany({ course: course._id })
+    await course.deleteOne()
+
+    res.json({ message: 'Course deleted successfully.' })
+  } catch (error) {
+    handleError(error, res)
+  }
+})
+
+// ENROLLMENTS
+
+app.get('/api/enrollments', async (req, res) => {
+  try {
+    const filter = {}
+
+    if (req.query.course) {
+      filter.course = req.query.course
+    }
+
+    const enrollments = await Enrollment.find(filter)
+      .populate('student')
+      .populate('course')
+
+    res.json(enrollments)
+  } catch (error) {
+    handleError(error, res)
+  }
+})
+
+app.post('/api/enrollments', async (req, res) => {
+  try {
+    const { studentId, courseId } = req.body
+
+    if (!studentId || !courseId) {
+      return res.status(400).json({
+        error: 'Select a student and course.'
+      })
+    }
+
+    const student = await Student.findById(studentId)
+    const course = await Course.findById(courseId)
+
+    if (!student || !course) {
+      return res.status(404).json({
+        error: 'Student or course does not exist.'
+      })
+    }
+
+    const enrollment = await Enrollment.create({
+      student: student._id,
+      course: course._id
+    })
+
+    res.status(201).json(enrollment)
+  } catch (error) {
+    handleError(error, res)
+  }
+})
+
+// SERVE BUILT VUE APPLICATION
+
+const distPath = path.join(__dirname, '../frontend/dist')
+
+app.use(express.static(distPath))
+
+app.get('/{*path}', (req, res) => {
+  res.sendFile(path.join(distPath, 'index.html'))
+})
+
+// START SERVER AFTER DATABASE CONNECTION
+
+async function startServer() {
+  try {
+    await mongoose.connect(process.env.MONGODB_URI)
+
+    await Promise.all([
+      Student.init(),
+      Course.init(),
+      Enrollment.init()
+    ])
+
+    console.log('Connected to MongoDB')
+
+    app.listen(PORT, () => {
+      console.log(`Server running at http://localhost:${PORT}`)
+    })
+  } catch (error) {
+    console.error('Startup failed:', error)
+    process.exit(1)
+  }
+}
+
+startServer()
